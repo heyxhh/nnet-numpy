@@ -1,119 +1,5 @@
 import numpy as np
 
-class Img2colIndices():
-    """
-    卷积网络的滑动计算实际上是将feature map转换成为矩阵乘法的方式。
-    卷积计算forward前需要将feature map转换成为cols格式，每一次滑动的窗口作为cols的一列
-    卷积计算backward时需要将cols态的梯度转换成为与输入map shape一致的格式
-    该辅助类完成feature map --> cols 以及 cols --> feature map
-
-    设计卷积、maxpool、average pool都有可能用到该类进行转换操作
-    """
-    def __init__(self, filter_size, padding, stride):
-        """
-        parameters:
-            filter_shape: 卷积核的尺寸(h_filter, w_filter)
-            padding: feature边缘填充0的个数
-            stride: filter滑动步幅
-        """
-        self.h_filter, self.w_filter = filter_size
-        self.padding = padding
-        self.stride = stride
-    
-    def get_img2col_indices(self, h_out, w_out):
-        """
-        获得需要由image转换为col的索引, 返回的索引是在feature map填充后对于尺寸的索引
-
-        获得每次卷积时，在feature map上卷积的元素的坐标索引。以后img2col时根据索引获得
-        i 的每一行，如第r行是filter第r个元素(左右上下的顺序)在不同位置卷积时点乘的元素的位置的row坐标索引
-        j 的每一行，如第r行是filter第r个元素(左右上下的顺序)在不同位置卷积时点乘的元素的位置的column坐标索引
-        结果i、j每一列，如第c列是filter第c次卷积的位置卷积的k×k个元素(左右上下的顺序)。
-        每一列长filter_height*filter_width*C，由于C个通道，每C个都是重复的，表示在第几个通道上做的卷积。
-
-        parameters:
-            h_out: 卷积层输出feature的height
-            w_out: 卷积层输出feature的width。每次调用imgcol时计算得到
-        return:
-            k: shape=(filter_height*filter_width*C, 1), 每挨着的filter_height*filter_width元素值都一样，表示从第几个通道取点
-            i: shape=(filter_height*filter_width*C, out_height*out_width), 依次待取元素的横坐标索引
-            j: shape=(filter_height*filter_width*C, out_height*out_width), 依次待取元素的纵坐标索引
-        """
-        i0 = np.repeat(np.arange(self.h_filter), self.w_filter)
-        i1 = np.repeat(np.arange(h_out), w_out) * self.stride
-        i = i0.reshape(-1, 1) + i1
-        i = np.tile(i, [self.c_x, 1])
-        
-        j0 = np.tile(np.arange(self.w_filter), self.h_filter)
-        j1 = np.tile(np.arange(w_out), h_out) * self.stride
-        j = j0.reshape(-1, 1) + j1
-        j = np.tile(j, [self.c_x, 1])
-        
-        k = np.repeat(np.arange(self.c_x), self.h_filter * self.w_filter).reshape(-1, 1)
-        
-        return k, i, j
-    
-    def img2col(self, X):
-        """
-        基于索引取元素的方法实现img2col
-        parameters:
-            x: 输入feature map，shape=(batch_size, channels, height, width)
-        return:
-            转换img2col,shape=(h_filter * w_filter*chanels, batch_size * h_out * w_out)
-        """
-        self.n_x, self.c_x, self.h_x, self.w_x = X.shape
-
-        # 首先计算出输出特征的尺寸
-        # 计算输出feature的尺寸,并且保证是整数
-        h_out = (self.h_x + 2 * self.padding - self.h_filter) / self.stride + 1
-        w_out = (self.w_x + 2 * self.padding - self.w_filter) / self.stride + 1
-        if not h_out.is_integer() or not w_out.is_integer():
-            raise Exception("Invalid dimention")
-        else:
-            h_out, w_out = int(h_out), int(w_out)  # 上一步在进行除法后类型会是float
-        
-        # 0填充输入feature map
-        x_padded = None
-        if self.padding > 0:
-            x_padded = np.pad(X, ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)), mode='constant')
-        else:
-            x_padded = X
-        
-        # 在计算出输出feature尺寸后,并且0填充X后，获得img2col_indices
-        # img2col_indices设为实例的属性，col2img时用，避免重复计算
-        self.img2col_indices = self.get_img2col_indices(h_out, w_out)
-        k, i, j = self.img2col_indices
-        
-        # 获得参与卷积计算的col形式
-        cols = x_padded[:, k, i, j]  # shape=(batch_size, h_filter*w_filter*n_channel, h_out*w_out)
-        cols = cols.transpose(1, 2, 0).reshape(self.h_filter * self.w_filter * self.c_x, -1)  # reshape
-        
-        return cols
-    
-    def col2img(self, cols):
-        """
-        img2col的逆过程
-        卷积网络，在求出x的梯度时，dx是col矩阵的形式(filter_height*filter_width*chanels, batch_size*out_height*out_width)
-        将dx有col格式转换成feature map的原尺寸格式。由get_img2col_indices获得该尺寸下的索引，使用numpt.add.at方法还原成img格式
-        parameters:
-            col: dx的col形式, shape=(h_filter*w_filter*n_chanels, batch_size*h_out*w_out)
-            batch_size: batch size,在调用是作为参数输入
-        """
-        # 将col还原成img2col的输出shape
-        cols = cols.reshape(self.h_filter * self.w_filter * self.c_x, -1, self.n_x)
-        cols = cols.transpose(2, 0, 1)
-        
-        h_padded, w_padded = self.h_x + 2 * self.padding, self.w_x + 2 * self.padding
-        x_padded = np.zeros((self.n_x, self.c_x, h_padded, w_padded))
-        
-        k, i, j = self.img2col_indices
-        
-        np.add.at(x_padded, (slice(None), k, i, j), cols)
-        
-        if self.padding == 0:
-            return x_padded
-        else:
-            return x_padded[:, :, self.padding : -self.padding, self.padding : -self.padding]
-
 # 定义conv2d
 class Conv2d():
     def __init__(self, in_channels, n_filter, filter_size, padding, stride):
@@ -241,6 +127,121 @@ class Maxpool():
         d_x = d_x.reshape(self.n_x, self.c_x, self.h_x, self.w_x)
         
         return d_x
+
+
+# 卷积网络复制类img2col
+class Img2colIndices():
+    """
+    卷积网络的滑动计算实际上是将feature map转换成为矩阵乘法的方式。
+    卷积计算forward前需要将feature map转换成为cols格式，每一次滑动的窗口作为cols的一列
+    卷积计算backward时需要将cols态的梯度转换成为与输入map shape一致的格式
+    该辅助类完成feature map --> cols 以及 cols --> feature map
+
+    设计卷积、maxpool、average pool都有可能用到该类进行转换操作
+    """
+    def __init__(self, filter_size, padding, stride):
+        """
+        parameters:
+            filter_shape: 卷积核的尺寸(h_filter, w_filter)
+            padding: feature边缘填充0的个数
+            stride: filter滑动步幅
+        """
+        self.h_filter, self.w_filter = filter_size
+        self.padding = padding
+        self.stride = stride
+    
+    def get_img2col_indices(self, h_out, w_out):
+        """
+        获得需要由image转换为col的索引, 返回的索引是在feature map填充后对于尺寸的索引
+
+        获得每次卷积时，在feature map上卷积的元素的坐标索引。以后img2col时根据索引获得
+        i 的每一行，如第r行是filter第r个元素(左右上下的顺序)在不同位置卷积时点乘的元素的位置的row坐标索引
+        j 的每一行，如第r行是filter第r个元素(左右上下的顺序)在不同位置卷积时点乘的元素的位置的column坐标索引
+        结果i、j每一列，如第c列是filter第c次卷积的位置卷积的k×k个元素(左右上下的顺序)。
+        每一列长filter_height*filter_width*C，由于C个通道，每C个都是重复的，表示在第几个通道上做的卷积。
+
+        parameters:
+            h_out: 卷积层输出feature的height
+            w_out: 卷积层输出feature的width。每次调用imgcol时计算得到
+        return:
+            k: shape=(filter_height*filter_width*C, 1), 每挨着的filter_height*filter_width元素值都一样，表示从第几个通道取点
+            i: shape=(filter_height*filter_width*C, out_height*out_width), 依次待取元素的横坐标索引
+            j: shape=(filter_height*filter_width*C, out_height*out_width), 依次待取元素的纵坐标索引
+        """
+        i0 = np.repeat(np.arange(self.h_filter), self.w_filter)
+        i1 = np.repeat(np.arange(h_out), w_out) * self.stride
+        i = i0.reshape(-1, 1) + i1
+        i = np.tile(i, [self.c_x, 1])
+        
+        j0 = np.tile(np.arange(self.w_filter), self.h_filter)
+        j1 = np.tile(np.arange(w_out), h_out) * self.stride
+        j = j0.reshape(-1, 1) + j1
+        j = np.tile(j, [self.c_x, 1])
+        
+        k = np.repeat(np.arange(self.c_x), self.h_filter * self.w_filter).reshape(-1, 1)
+        
+        return k, i, j
+    
+    def img2col(self, X):
+        """
+        基于索引取元素的方法实现img2col
+        parameters:
+            x: 输入feature map，shape=(batch_size, channels, height, width)
+        return:
+            转换img2col,shape=(h_filter * w_filter*chanels, batch_size * h_out * w_out)
+        """
+        self.n_x, self.c_x, self.h_x, self.w_x = X.shape
+
+        # 首先计算出输出特征的尺寸
+        # 计算输出feature的尺寸,并且保证是整数
+        h_out = (self.h_x + 2 * self.padding - self.h_filter) / self.stride + 1
+        w_out = (self.w_x + 2 * self.padding - self.w_filter) / self.stride + 1
+        if not h_out.is_integer() or not w_out.is_integer():
+            raise Exception("Invalid dimention")
+        else:
+            h_out, w_out = int(h_out), int(w_out)  # 上一步在进行除法后类型会是float
+        
+        # 0填充输入feature map
+        x_padded = None
+        if self.padding > 0:
+            x_padded = np.pad(X, ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)), mode='constant')
+        else:
+            x_padded = X
+        
+        # 在计算出输出feature尺寸后,并且0填充X后，获得img2col_indices
+        # img2col_indices设为实例的属性，col2img时用，避免重复计算
+        self.img2col_indices = self.get_img2col_indices(h_out, w_out)
+        k, i, j = self.img2col_indices
+        
+        # 获得参与卷积计算的col形式
+        cols = x_padded[:, k, i, j]  # shape=(batch_size, h_filter*w_filter*n_channel, h_out*w_out)
+        cols = cols.transpose(1, 2, 0).reshape(self.h_filter * self.w_filter * self.c_x, -1)  # reshape
+        
+        return cols
+    
+    def col2img(self, cols):
+        """
+        img2col的逆过程
+        卷积网络，在求出x的梯度时，dx是col矩阵的形式(filter_height*filter_width*chanels, batch_size*out_height*out_width)
+        将dx有col格式转换成feature map的原尺寸格式。由get_img2col_indices获得该尺寸下的索引，使用numpt.add.at方法还原成img格式
+        parameters:
+            cols: dx的col形式, shape=(h_filter*w_filter*n_chanels, batch_size*h_out*w_out)
+        """
+        # 将col还原成img2col的输出shape
+        cols = cols.reshape(self.h_filter * self.w_filter * self.c_x, -1, self.n_x)
+        cols = cols.transpose(2, 0, 1)
+        
+        h_padded, w_padded = self.h_x + 2 * self.padding, self.w_x + 2 * self.padding
+        x_padded = np.zeros((self.n_x, self.c_x, h_padded, w_padded))
+        
+        k, i, j = self.img2col_indices
+        
+        np.add.at(x_padded, (slice(None), k, i, j), cols)
+        
+        if self.padding == 0:
+            return x_padded
+        else:
+            return x_padded[:, :, self.padding : -self.padding, self.padding : -self.padding]
 
 
 # 定义BatchNorm2d
