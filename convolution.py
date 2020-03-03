@@ -129,7 +129,7 @@ class Maxpool():
         return d_x
 
 
-# 卷积网络复制类img2col
+# 卷积网络辅助类img和col的转换
 class Img2colIndices():
     """
     卷积网络的滑动计算实际上是将feature map转换成为矩阵乘法的方式。
